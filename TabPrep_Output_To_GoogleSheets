@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""
+Tableau Prep to Google Sheets Automation Script
+This script takes data from Tableau Prep and automatically creates/updates Google Sheets
+with monthly tabs.
+"""
+
+import pandas as pd
+import gspread
+from google.oauth2.service_account import Credentials
+from datetime import datetime
+import sys
+import os
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+def get_tableau_data():
+    """
+    Get data from Tableau Prep
+    Tableau Prep will pass the data through stdin or as a pandas DataFrame
+    """
+    # For Tableau Prep, the data comes in as the first argument or stdin
+    # This is the standard way Tableau Prep interfaces with Python scripts
+    
+    # Read from stdin (Tableau Prep's standard method)
+    input_data = pd.read_csv(sys.stdin)
+    
+    logger.info(f"Received {len(input_data)} rows from Tableau Prep")
+    return input_data
+
+def setup_google_sheets_client():
+    """
+    Set up Google Sheets API client using service account credentials
+    """
+    # Define the scope
+    scope = [
+        'https://spreadsheets.google.com/feeds',
+        'https://www.googleapis.com/auth/drive'
+    ]
+    
+    # Path to your service account key file
+    # Customer needs to download this from Google Cloud Console
+    credentials_file = 'path/to/your/service-account-key.json'
+    
+    if not os.path.exists(credentials_file):
+        raise FileNotFoundError(f"Credentials file not found: {credentials_file}")
+    
+    # Authenticate and return the client
+    credentials = Credentials.from_service_account_file(credentials_file, scopes=scope)
+    client = gspread.authorize(credentials)
+    
+    logger.info("Google Sheets client authenticated successfully")
+    return client
+
+def get_or_create_monthly_sheet(client, spreadsheet_name, current_date):
+    """
+    Get existing spreadsheet or create new one for the current month
+    """
+    sheet_name = current_date.strftime("%Y-%m")  # Format: 2024-01
+    full_spreadsheet_name = f"{spreadsheet_name}_{sheet_name}"
+    
+    try:
+        # Try to open existing spreadsheet
+        spreadsheet = client.open(full_spreadsheet_name)
+        logger.info(f"Opened existing spreadsheet: {full_spreadsheet_name}")
+    except gspread.SpreadsheetNotFound:
+        # Create new spreadsheet for this month
+        spreadsheet = client.create(full_spreadsheet_name)
+        logger.info(f"Created new spreadsheet: {full_spreadsheet_name}")
+        
+        # Share with your email (optional)
+        # spreadsheet.share('your-email@domain.com', perm_type='user', role='writer')
+    
+    return spreadsheet
+
+def get_or_create_data_tab(spreadsheet, tab_name="Data"):
+    """
+    Get existing data tab or create new one
+    """
+    try:
+        worksheet = spreadsheet.worksheet(tab_name)
+        logger.info(f"Using existing worksheet: {tab_name}")
+    except gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(title=tab_name, rows="1000", cols="26")
+        logger.info(f"Created new worksheet: {tab_name}")
+    
+    return worksheet
+
+def append_data_to_sheet(worksheet, data_df):
+    """
+    Append new data to the Google Sheet
+    """
+    # Check if sheet is empty (no headers)
+    try:
+        existing_data = worksheet.get_all_records()
+        if not existing_data:
+            # Sheet is empty, add headers
+            headers = data_df.columns.tolist()
+            worksheet.append_row(headers)
+            logger.info("Added headers to empty sheet")
+    except Exception as e:
+        logger.warning(f"Could not check existing data: {e}")
+        # Add headers anyway
+        headers = data_df.columns.tolist()
+        worksheet.append_row(headers)
+    
+    # Convert DataFrame to list of lists for Google Sheets
+    data_rows = data_df.values.tolist()
+    
+    # Append all rows at once (more efficient)
+    if data_rows:
+        worksheet.append_rows(data_rows)
+        logger.info(f"Appended {len(data_rows)} rows to worksheet")
+    
+    return len(data_rows)
+
+def main():
+    """
+    Main execution function
+    """
+    try:
+        # Configuration - Customer should modify these
+        SPREADSHEET_BASE_NAME = "Monthly_Data_Report"  # Base name for spreadsheets
+        
+        # Get current date
+        current_date = datetime.now()
+        
+        # Step 1: Get data from Tableau Prep
+        logger.info("Reading data from Tableau Prep...")
+        data = get_tableau_data()
+        
+        if data.empty:
+            logger.warning("No data received from Tableau Prep")
+            return
+        
+        # Step 2: Set up Google Sheets client
+        logger.info("Setting up Google Sheets connection...")
+        client = setup_google_sheets_client()
+        
+        # Step 3: Get or create monthly spreadsheet
+        logger.info("Getting/creating monthly spreadsheet...")
+        spreadsheet = get_or_create_monthly_sheet(client, SPREADSHEET_BASE_NAME, current_date)
+        
+        # Step 4: Get or create data tab
+        logger.info("Getting/creating data worksheet...")
+        worksheet = get_or_create_data_tab(spreadsheet, "Data")
+        
+        # Step 5: Append data to sheet
+        logger.info("Appending data to Google Sheet...")
+        rows_added = append_data_to_sheet(worksheet, data)
+        
+        # Step 6: Output result back to Tableau Prep (if needed)
+        # Tableau Prep expects output to stdout
+        data.to_csv(sys.stdout, index=False)
+        
+        logger.info(f"Success! Added {rows_added} rows to {spreadsheet.title}")
+        
+    except Exception as e:
+        logger.error(f"Error in main execution: {str(e)}")
+        raise
+
+if __name__ == "__main__":
+    main()
+
+
+# SETUP INSTRUCTIONS FOR CUSTOMER:
+"""
+1. Install required packages:
+   pip install pandas gspread google-auth
+
+2. Set up Google Sheets API:
+   - Go to Google Cloud Console (console.cloud.google.com)
+   - Create a new project or select existing
+   - Enable Google Sheets API and Google Drive API
+   - Create service account credentials
+   - Download the JSON key file
+   - Update the 'credentials_file' path in the script
+
+3. Configure the script:
+   - Update SPREADSHEET_BASE_NAME to your desired name
+   - Update credentials_file path
+   - Optionally add email sharing in get_or_create_monthly_sheet()
+
+4. In Tableau Prep:
+   - Add a "Script" step to your flow
+   - Select "Python"
+   - Point to this script file
+   - The script will receive data and pass it through
+
+5. Test the flow:
+   - Run your Tableau Prep flow
+   - Check Google Drive for new spreadsheet
+   - Verify data appears correctly
+
+MONTHLY BEHAVIOR:
+- Script automatically creates new spreadsheet each month
+- Format: "Monthly_Data_Report_2024-01", "Monthly_Data_Report_2024-02", etc.
+- Each run appends data to the current month's sheet
+- Headers are added automatically if sheet is empty
+"""
